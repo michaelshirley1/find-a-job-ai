@@ -1,5 +1,3 @@
-// Package jobspy shells out to the Python JobSpy library (github.com/speedyapply/JobSpy)
-// via scripts/jobspy_search.py, since JobSpy has no Go equivalent.
 package jobspy
 
 import (
@@ -15,17 +13,15 @@ import (
 	"github.com/michaelgov-ctrl/find-a-job/internal/models"
 )
 
-// SearchParams configures a JobSpy scrape.
 type SearchParams struct {
 	SearchTerm    string
 	Location      string
 	Sites         []string // e.g. ["indeed", "linkedin", "zip_recruiter", "glassdoor", "google"]
 	ResultsWanted int
-	HoursOld      int // 0 means unset / no filter
+	HoursOld      int
 	CountryIndeed string
 }
 
-// rawJob mirrors the JSON fields JobSpy emits for each scraped listing.
 type rawJob struct {
 	ID          string `json:"id"`
 	Site        string `json:"site"`
@@ -37,8 +33,6 @@ type rawJob struct {
 	DatePosted  string `json:"date_posted"`
 }
 
-// pythonExe and scriptPath are resolved once but overridable via env vars, since the
-// Python interpreter and script location vary across dev machines and deployments.
 func pythonExe() string {
 	if v := os.Getenv("JOBSPY_PYTHON"); v != "" {
 		return v
@@ -53,7 +47,6 @@ func scriptPath() string {
 	return "scripts/jobspy_search.py"
 }
 
-// Search runs the JobSpy CLI wrapper and returns the scraped listings as Jobs.
 func Search(ctx context.Context, p SearchParams) ([]models.Job, error) {
 	if p.SearchTerm == "" {
 		return nil, fmt.Errorf("jobspy: search term is required")

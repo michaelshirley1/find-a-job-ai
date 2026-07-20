@@ -11,12 +11,8 @@ import (
 	"github.com/michaelgov-ctrl/find-a-job/internal/jobspy"
 )
 
-// searchTimeout bounds how long a JobSpy subprocess may run, since it scrapes multiple
-// external job sites and can hang or run long on a slow network.
 const searchTimeout = 60 * time.Second
 
-// SearchJobs handles GET /api/jobs/search, running a JobSpy scrape from query params:
-// term (required), location, sites (comma-separated), results, hours_old, country.
 func SearchJobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 

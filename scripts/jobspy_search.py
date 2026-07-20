@@ -1,8 +1,3 @@
-"""CLI wrapper around python-jobspy: reads search args, prints job results as JSON on stdout.
-
-Invoked as a subprocess by internal/jobspy (see jobspy.go) rather than imported directly,
-since JobSpy is a Python-only library with no Go equivalent.
-"""
 import argparse
 import json
 import sys
