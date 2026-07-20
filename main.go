@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+
+	"github.com/michaelgov-ctrl/find-a-job/internal/api"
 )
 
 //go:embed all:web/dist
@@ -13,7 +15,7 @@ var webFiles embed.FS
 func main() {
 	mux := http.NewServeMux()
 
-	// TODO: register API routes here
+	mux.HandleFunc("GET /api/jobs/search", api.SearchJobs)
 
 	distFS, err := fs.Sub(webFiles, "web/dist")
 	if err != nil {
