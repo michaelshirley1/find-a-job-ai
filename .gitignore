@@ -52,3 +52,11 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+### Personal job-search data/config (see scripts/profile.example.json) ###
+scripts/profile.json
+data/reports/
+data/seen_jobs.json
+
+### Claude Code local settings (machine-specific, see .claude/settings.json for shared config) ###
+.claude/settings.local.json

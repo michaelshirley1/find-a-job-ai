@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python scripts/daily_job_search.py*)"
+    ]
+  }
+}

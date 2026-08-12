@@ -1,1 +1,3 @@
 python-jobspy
+requests
+beautifulsoup4

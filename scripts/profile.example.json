@@ -1,0 +1,40 @@
+{
+  "candidate_name": "Alex Example",
+  "job_titles": ["Backend Engineer Python", "Full Stack Engineer", "Data Engineer"],
+  "locations": ["Tokyo, Japan", "Osaka, Japan"],
+  "market": "japan",
+  "country_indeed": "Japan",
+  "years_experience": 3,
+
+  "core_skills": {
+    "python": 10,
+    "django": 8,
+    "fastapi": 8,
+    "postgres": 5,
+    "sql": 4,
+    "docker": 3,
+    "aws": 5,
+    "kubernetes": 4
+  },
+  "secondary_skills": {
+    "go": 5,
+    "typescript": 4,
+    "react": 3
+  },
+  "core_stack_max": 40,
+  "secondary_stack_cap": 16,
+
+  "language_requirements": {
+    "target_language": "japanese",
+    "certified_level": null,
+    "tag_clear": ["No Japanese required", "None"],
+    "tag_flag": ["Basic Japanese", "Minimum Communication Level"]
+  },
+
+  "work_authorization": {
+    "target_country": "Japan",
+    "country_adjective": "japanese",
+    "status": "needs_sponsorship",
+    "notes": "Eligible for a work visa but needs an employer willing to sponsor/petition."
+  }
+}
