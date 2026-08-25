@@ -79,6 +79,7 @@ def load_profile(path):
     profile.setdefault("secondary_stack_cap", 16)
     profile.setdefault("language_requirements", {})
     profile.setdefault("work_authorization", {})
+    profile.setdefault("work_location_preference", "any")
     return profile
 
 
@@ -115,6 +116,8 @@ JP_HARD_FAIL_PATTERNS = [
     r"japanese\s+and\s+english",
     r"japanese.{0,15}(required|mandatory|essential)",
     r"japanese\s+level",
+    r"(communication|language)\s+skills?\s+in\s+japanese",
+    r"japanese\s+to\s+(work|communicate|collaborate|interact)\s+(effectively\s+)?with",
     r"日本語で業務上の会話",
     r"日本語ビジネスレベル",
     r"日本語ネイティブレベル",
@@ -266,6 +269,65 @@ def check_workauth(text, tag_value, disqualify_patterns, positive_patterns):
         if m:
             return "clear", f"matched: '{m.group(0)}'"
     return "silent", "no sponsorship/work-authorization statement found"
+
+
+# ---------------------------------------------------------------------------
+# Location-type checks (remote vs. onsite/hybrid) — profile-independent regexes,
+# gated by profile.work_location_preference
+# ---------------------------------------------------------------------------
+
+# JobSpy's own is_remote flag is unreliable (confirmed on a NZ search returning
+# ordinary onsite/hybrid listings under is_remote=True) — read the description text
+# instead, same approach as the language/work-auth checks above.
+LOCATION_REMOTE_SIGNALS = [
+    r"fully remote", r"100%\s*remote", r"remote[- ]first", r"remote[- ]only",
+    r"work from anywhere", r"this is a (fully )?remote (role|position)",
+    r"remote position", r"fully distributed team", r"remote,?\s*no office",
+]
+LOCATION_HYBRID_SIGNALS = [
+    r"\bhybrid\b",
+    # Bounded to 1-4 days/week — 5 days/week in-office is full-time onsite, not
+    # hybrid, and must fall through to LOCATION_ONSITE_ONLY_SIGNALS instead.
+    r"\b[1-4]\s*days?\s*(a|per)\s*week\s*(in|at)\s*(the\s*)?office",
+    r"in.office\s*[1-4]\s*days?",
+]
+LOCATION_ONSITE_ONLY_SIGNALS = [
+    r"on[- ]site only", r"not a remote (position|role)", r"no remote work",
+    r"must work on[- ]site", r"in.office\s*(position|role)\b",
+    r"5\s*days?\s*(a|per)\s*week\s*in\s*(the\s*)?office",
+    r"relocation to (our )?office required",
+]
+
+
+def check_location_type(title, text, tags, preference):
+    """preference: 'onsite_hybrid' (Japan-style — exclude remote-anywhere-only
+    listings), 'remote' (exclude onsite-only listings), or anything else (no-op)."""
+    if preference not in ("onsite_hybrid", "remote"):
+        return "not_applicable", "no location-type preference configured for this profile"
+
+    combined = f"{title} {' '.join(tags)} {text or ''}".lower()
+    if not combined.strip():
+        return "silent", "no description text available"
+
+    remote_m = next((m for p in LOCATION_REMOTE_SIGNALS if (m := re.search(p, combined))), None)
+    hybrid_m = next((m for p in LOCATION_HYBRID_SIGNALS if (m := re.search(p, combined))), None)
+    onsite_m = next((m for p in LOCATION_ONSITE_ONLY_SIGNALS if (m := re.search(p, combined))), None)
+
+    if preference == "onsite_hybrid":
+        if remote_m and not hybrid_m:
+            return "fail", f"fully remote, no onsite/hybrid option mentioned: '{remote_m.group(0)}'"
+        if hybrid_m:
+            return "clear", f"hybrid: '{hybrid_m.group(0)}'"
+        return "silent", "no explicit remote/hybrid language found (assuming onsite by default)"
+
+    # preference == "remote"
+    if onsite_m and not (remote_m or hybrid_m):
+        return "fail", f"onsite-only, no remote option mentioned: '{onsite_m.group(0)}'"
+    if remote_m:
+        return "clear", f"remote: '{remote_m.group(0)}'"
+    if hybrid_m:
+        return "flagged", f"hybrid, not fully remote: '{hybrid_m.group(0)}'"
+    return "silent", "no explicit remote/hybrid/onsite language found"
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +491,51 @@ def score_stack(title, text, tags, core_patterns, secondary_patterns, core_max, 
 
 
 # ---------------------------------------------------------------------------
+# Salary extraction
+# ---------------------------------------------------------------------------
+
+# Generic salary-looking substring for sources with no structured field
+# (TokyoDev/Japan Dev card tags) — a currency symbol followed by a number,
+# optionally a range, optionally K/M shorthand.
+SALARY_TEXT_RE = re.compile(
+    r"[¥$€£]\s?[\d][\d,\.]*\s?[MK]?(?:\s?[-–]\s?[¥$€£]?\s?[\d][\d,\.]*\s?[MK]?)?"
+)
+
+
+def format_salary_jobspy(r):
+    """Pull JobSpy's structured min_amount/max_amount/currency/interval columns
+    into one display string. Cells are NaN (not None) when absent — pandas'
+    numeric-column fill — so isna() is required, a plain `is None` check misses
+    them."""
+    import pandas as pd
+
+    mn, mx = r.get("min_amount"), r.get("max_amount")
+    mn = None if pd.isna(mn) else mn
+    mx = None if pd.isna(mx) else mx
+    if mn is None and mx is None:
+        return None
+
+    currency = r.get("currency")
+    currency = None if pd.isna(currency) else str(currency)
+    interval = r.get("interval")
+    interval = None if pd.isna(interval) else str(interval)
+
+    def fmt(n):
+        return f"{n:,.0f}"
+
+    amount = f"{fmt(mn)}-{fmt(mx)}" if (mn is not None and mx is not None and mn != mx) else fmt(mn if mn is not None else mx)
+    out = " ".join(p for p in [currency, amount] if p)
+    return f"{out}/{interval}" if interval else out
+
+
+def extract_salary_text(text):
+    if not text:
+        return None
+    m = SALARY_TEXT_RE.search(text)
+    return m.group(0) if m else None
+
+
+# ---------------------------------------------------------------------------
 # Scrapers
 # ---------------------------------------------------------------------------
 
@@ -472,6 +579,7 @@ def scrape_jobspy(job_titles, locations, country_indeed, hours_old):
             "language_tag": None,
             "sponsorship_tag": None,
             "detail_blocked": False,
+            "salary": format_salary_jobspy(r),
         })
     return jobs
 
@@ -508,6 +616,7 @@ def scrape_tokyodev():
             "language_tag": lang,
             "sponsorship_tag": "apply_abroad" if apply_abroad else ("japan_only" if japan_only else None),
             "detail_blocked": True,
+            "salary": extract_salary_text(text),
         }
     return list(seen.values())
 
@@ -539,6 +648,7 @@ def scrape_japandev():
             "sponsorship_tag": "japan_only" if residents_only else ("apply_abroad" if apply_abroad else None),
             "detail_blocked": False,
             "_href": href,
+            "salary": extract_salary_text(text),
         })
     return jobs
 
@@ -575,6 +685,7 @@ def scrape_daijob(job_titles):
                 if lvl not in keep_levels:
                     continue
                 title_m = re.search(r"Staff Level \| ([^|]+) \| ([^|]+)", text)
+                sal_m = re.search(r"Salary \| ([^|]+)", text)
                 cards[href] = {
                     "source": "daijob",
                     "title": title_m.group(2).strip() if title_m else text[:80],
@@ -587,6 +698,7 @@ def scrape_daijob(job_titles):
                     "sponsorship_tag": None,
                     "detail_blocked": False,
                     "_href": href,
+                    "salary": sal_m.group(1).strip() if sal_m else extract_salary_text(text),
                 }
         except Exception as e:
             print(f"  [daijob] {term}: ERROR {e}", file=sys.stderr)
@@ -617,7 +729,7 @@ def grade_from_score(score):
     return "F"
 
 
-def estimate_interview_chance(score, lang_status, auth_status, sen_status, role_status, recruiter_spam):
+def estimate_interview_chance(score, lang_status, auth_status, sen_status, role_status, recruiter_spam, loc_status):
     """Heuristic estimate, NOT a statistical model — there's no historical outcome
     data behind this. It's a calibrated-by-feel translation of the same signals
     already in the grade, biased low. Use it to rank A/B listings against each
@@ -640,6 +752,11 @@ def estimate_interview_chance(score, lang_status, auth_status, sen_status, role_
         base -= 10
     if recruiter_spam:
         base -= 10
+    if loc_status == "silent":
+        # A configured onsite_hybrid/remote preference with no explicit signal in the
+        # JD is unverified, not cleared — same treatment as a silent language/work-auth
+        # check. loc_status is "not_applicable" (no penalty) when no preference is set.
+        base -= 7
 
     return round(max(3.0, min(70.0, base)))
 
@@ -649,6 +766,7 @@ def evaluate(job, ctx):
     title = job["title"]
     text = job["description"]
     tags = job.get("tags") or []
+    job.setdefault("salary", None)
 
     ai_gig, ai_evidence = check_ai_gig(text)
     if ai_gig:
@@ -662,12 +780,28 @@ def evaluate(job, ctx):
         job["exclusion_reason"] = f"Language requirement: {lang_evidence}"
         return False
 
-    auth_status, auth_evidence = check_workauth(
-        text, job.get("sponsorship_tag"), ctx["workauth_disqualify"], ctx["workauth_positive"]
-    )
+    if ctx["workauth_is_citizen"]:
+        # A candidate who already holds citizenship of the target country needs no
+        # visa or sponsorship at all — none of the sponsorship-related disqualify
+        # patterns (built for the "needs an employer to sponsor a visa" case) or a
+        # bare "{country} citizenship required" phrase apply to them. Short-circuit
+        # rather than pattern-match: previously a genuine NZ citizen was wrongly
+        # excluded from an NZ-market search over a posting that said "New Zealand
+        # citizenship" required — a requirement they trivially satisfy.
+        auth_status, auth_evidence = "clear", f"candidate holds {ctx['workauth_country']} citizenship — no visa/sponsorship needed"
+    else:
+        auth_status, auth_evidence = check_workauth(
+            text, job.get("sponsorship_tag"), ctx["workauth_disqualify"], ctx["workauth_positive"]
+        )
     if auth_status == "fail":
         job["excluded"] = True
         job["exclusion_reason"] = f"Work authorization: {auth_evidence}"
+        return False
+
+    loc_status, loc_evidence = check_location_type(title, text, tags, ctx["location_pref"])
+    if loc_status == "fail":
+        job["excluded"] = True
+        job["exclusion_reason"] = f"Location type: {loc_evidence}"
         return False
 
     sen_status, sen_evidence = check_seniority(title, text, ctx["years_experience"])
@@ -695,10 +829,17 @@ def evaluate(job, ctx):
         total = min(total, 69)  # cap at C — unreliable / staffing-agency-template listing
     if sen_status == "big_stretch":
         total = min(total, 64)  # cap at C — an explicit large years-of-experience gap
+    if loc_status == "silent":
+        # Under a configured onsite_hybrid/remote preference, a JD that says nothing
+        # about remote/hybrid/onsite is unverified, not cleared — knock it down a
+        # rough grade-band's worth of points so it ranks below a confirmed match
+        # instead of tying with one. No penalty when loc_status is "not_applicable"
+        # (no preference configured on this profile).
+        total = max(0, total - 15)
 
     grade = grade_from_score(total)
     interview_pct = estimate_interview_chance(
-        total, lang_status, auth_status, sen_status, role_status, recruiter_spam
+        total, lang_status, auth_status, sen_status, role_status, recruiter_spam, loc_status
     )
 
     job.update({
@@ -714,6 +855,8 @@ def evaluate(job, ctx):
         "seniority_evidence": sen_evidence,
         "role_status": role_status,
         "role_evidence": role_evidence,
+        "location_status": loc_status,
+        "location_evidence": loc_evidence,
         "stack_score": stack_score,
         "stack_note": stack_note,
         "recruiter_spam": recruiter_spam,
@@ -744,7 +887,12 @@ def save_state(state):
 
 def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded_count, profile):
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    path = os.path.join(REPORTS_DIR, f"{today}.md")
+    # Suffix by market so running multiple profiles on the same day doesn't
+    # clobber each other's report (bare "japan" keeps the pre-existing filename
+    # convention for the original/default profile).
+    market = profile.get("market") or "other"
+    suffix = "" if market == "japan" else f"-{market}"
+    path = os.path.join(REPORTS_DIR, f"{today}{suffix}.md")
 
     new_graded.sort(key=lambda j: (-j["score"], j["title"]))
 
@@ -760,7 +908,11 @@ def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded
         "language clearance (0-20), work-authorization clearance (0-20), seniority fit (0-10), "
         f"role-family fit (0-10). A ≥85, B ≥70, C ≥55, D ≥40, F <40. Recruiter/staffing-template "
         f"listings, and any listing with a years-of-experience ask well above your ~{profile['years_experience']}, "
-        "are capped at C regardless of score."
+        "are capped at C regardless of score. Location-type mismatches (fully-remote-only listings under an "
+        "onsite/hybrid profile, or onsite-only listings under a remote profile) are hard-excluded, not scored — "
+        "see 'Location' column / excluded-listings section. A profile with a location preference configured "
+        "(onsite_hybrid/remote) also docks 15 points from any listing that's silent on remote/hybrid/onsite "
+        "(unverified, not cleared) — it stays in the results but ranks below a confirmed match."
     )
     lines.append("")
     lines.append(
@@ -776,13 +928,15 @@ def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded
     if a_b:
         lines.append("## New A/B listings — ranked by estimated interview chance")
         lines.append("")
-        lines.append("| Grade | Est. interview % | Score | Company | Role | Stack note | Language | Work-auth | Seniority | Link |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("| Grade | Est. interview % | Score | Company | Role | Salary | Stack note | Language | Work-auth | Location | Seniority | Link |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for j in sorted(a_b, key=lambda j: (-j["interview_pct"], -j["score"])):
             lines.append(
                 f"| {j['grade']} | {j['interview_pct']}% | {j['score']} | {j['company']} | {j['title']} | "
+                f"{j.get('salary') or '—'} | "
                 f"{j['stack_note']} | {j['language_status']}: {j['language_evidence']} | "
                 f"{j['workauth_status']}: {j['workauth_evidence']} | "
+                f"{j['location_status']}: {j['location_evidence']} | "
                 f"{j['seniority_status']}: {j['seniority_evidence']} | [{j['source']}]({j['job_url']}) |"
             )
         lines.append("")
@@ -790,13 +944,15 @@ def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded
     if rest:
         lines.append("## New C/D/F listings")
         lines.append("")
-        lines.append("| Grade | Score | Company | Role | Stack note | Language | Work-auth | Seniority | Link |")
-        lines.append("|---|---|---|---|---|---|---|---|---|")
+        lines.append("| Grade | Score | Company | Role | Salary | Stack note | Language | Work-auth | Location | Seniority | Link |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for j in rest:
             lines.append(
                 f"| {j['grade']} | {j['score']} | {j['company']} | {j['title']} | "
+                f"{j.get('salary') or '—'} | "
                 f"{j['stack_note']} | {j['language_status']}: {j['language_evidence']} | "
                 f"{j['workauth_status']}: {j['workauth_evidence']} | "
+                f"{j['location_status']}: {j['location_evidence']} | "
                 f"{j['seniority_status']}: {j['seniority_evidence']} | [{j['source']}]({j['job_url']}) |"
             )
         lines.append("")
@@ -811,7 +967,8 @@ def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded
         lines.append("## New excluded listings (why)")
         lines.append("")
         for j in new_excluded:
-            lines.append(f"- **{j['company']}** — {j['title']}: {j['exclusion_reason']} ([{j['source']}]({j['job_url']}))")
+            sal = f" ({j['salary']})" if j.get("salary") else ""
+            lines.append(f"- **{j['company']}** — {j['title']}{sal}: {j['exclusion_reason']} ([{j['source']}]({j['job_url']}))")
         lines.append("")
 
     lines.append("## Source notes")
@@ -855,12 +1012,15 @@ def main():
         "lang_req": lang_req,
         "workauth_disqualify": workauth_disqualify,
         "workauth_positive": workauth_positive,
+        "workauth_is_citizen": bool(profile["work_authorization"].get("is_citizen")),
+        "workauth_country": profile["work_authorization"].get("target_country") or "the target country",
         "years_experience": profile["years_experience"],
         "core_patterns": build_stack_patterns(profile["core_skills"]),
         "secondary_patterns": build_stack_patterns(profile["secondary_skills"]),
         "core_max": profile["core_stack_max"],
         "secondary_cap": profile["secondary_stack_cap"],
         "secondary_names": list(profile["secondary_skills"].keys()),
+        "location_pref": profile["work_location_preference"],
     }
 
     today = datetime.now().strftime("%Y-%m-%d")  # local date — this is a once-a-day-by-local-calendar tool

@@ -35,6 +35,9 @@
     "target_country": "Japan",
     "country_adjective": "japanese",
     "status": "needs_sponsorship",
-    "notes": "Eligible for a work visa but needs an employer willing to sponsor/petition."
-  }
+    "is_citizen": false,
+    "notes": "Eligible for a work visa but needs an employer willing to sponsor/petition. Set is_citizen: true only if the candidate genuinely holds citizenship of target_country — that short-circuits the whole work-authorization check to 'clear', since a citizen needs no sponsorship and a bare '{country} citizenship required' phrase is a non-issue for them, not a disqualifier."
+  },
+
+  "work_location_preference": "onsite_hybrid"
 }

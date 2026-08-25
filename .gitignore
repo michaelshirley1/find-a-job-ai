@@ -55,6 +55,7 @@ Thumbs.db
 
 ### Personal job-search data/config (see scripts/profile.example.json) ###
 scripts/profile.json
+scripts/profile_*.json
 data/reports/
 data/seen_jobs.json
 

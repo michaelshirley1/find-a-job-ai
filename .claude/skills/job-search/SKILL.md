@@ -18,11 +18,32 @@ candidate profile to work from.
 ## Candidate profile
 
 All filtering/scoring (stack fit, language requirement, work authorization,
-seniority) is driven by a profile — see `scripts/profile.example.json` for the
-full schema. It covers: target job title(s), target location(s), market,
-years of experience, **core (production) skills** vs **secondary (hobby/
-self-taught/non-production) skills**, a language-requirement block, and a
-work-authorization block.
+seniority, location type) is driven by a profile — see
+`scripts/profile.example.json` for the full schema. It covers: target job
+title(s), target location(s), market, years of experience, **core
+(production) skills** vs **secondary (hobby/self-taught/non-production)
+skills**, a language-requirement block, a work-authorization block, and
+`work_location_preference`.
+
+This repo ships three real profiles for the same candidate (Michael), one per
+target market — pass whichever one fits with `--profile`:
+- `scripts/profile.json` — Japan, onsite/hybrid (the default the daily script
+  reads if `--profile` isn't given).
+- `scripts/profile_nz_remote.json` — New Zealand, remote.
+- `scripts/profile_australia_remote.json` — Australia, remote.
+
+`work_location_preference` is `"onsite_hybrid"`, `"remote"`, or `"any"`
+(no filtering — the default if the field is omitted). `daily_job_search.py`
+hard-excludes on a mismatch: an `"onsite_hybrid"` profile drops listings whose
+description reads as fully-remote-only with no hybrid/office option; a
+`"remote"` profile drops listings that read as onsite-only with no
+remote/hybrid option. Both are regex-based description checks (see
+`check_location_type` / `LOCATION_*_SIGNALS` in `daily_job_search.py`) — same
+reasoning as the JobSpy `is_remote` unreliability noted below: don't trust a
+site's remote flag/location tag alone, read the actual text. A listing that
+says nothing about location type either way is passed through as `"silent"`,
+not excluded — that's most Japan postings, which default to onsite by
+omission rather than stating it outright.
 
 Before running a search:
 
@@ -305,9 +326,14 @@ whose description is silent on the topic.
 
 ## Ad-hoc searches in a market different from the profile's default
 
+NZ and Australia are no longer ad-hoc for this candidate — use
+`scripts/profile_nz_remote.json` / `scripts/profile_australia_remote.json`
+with `daily_job_search.py --profile ...` instead of the manual path below.
+This section is for genuinely new markets with no profile yet.
+
 When asked to search a market the current profile isn't set up for (e.g. the
-profile targets Japan but the user asks "what about NZ?"), this is a one-off
-deviation from the script's profile-driven pipeline — do it manually via
+profile targets Japan but the user asks "what about the UK?"), this is a
+one-off deviation from the script's profile-driven pipeline — do it manually via
 `scrape_jobs` (same pattern as the "Running the search" section above), and
 **skip** whatever language/work-authorization checks are specific to the
 profile's configured market (not relevant elsewhere). Still apply:
@@ -422,6 +448,19 @@ and stack/skill scoring.
   to run the normal language/stack regex over templated recruiter spam, since the
   garbled text can dodge both the CJK-ratio check (low prose-to-symbol ratio) and
   the requirement regexes.
+- **GE HealthCare "Digital Manufacturing Engineer"** (LinkedIn, found 2026-08-15) —
+  graded A/91 with language marked "silent" despite the JD stating "Strong
+  communication skills in Japanese to work effectively with manufacturing
+  engineering teams and shop-floor personnel." None of the existing hard-fail
+  patterns matched this phrasing (no "required/mandatory/essential" within 15
+  chars of "japanese", no "fluent/native/business-level japanese"). User caught
+  it manually. Fixed by adding `(communication|language) skills? in japanese` and
+  `japanese to (work|communicate|collaborate|interact) (effectively )?with` to
+  `JP_HARD_FAIL_PATTERNS` in `daily_job_search.py`. Lesson: "skills in Japanese"
+  / "Japanese to work/communicate with X" is a real requirement phrasing pattern
+  distinct from the "fluent/native/business-level" family already covered —
+  watch for other unclaimed phrasings like it when spot-checking "silent"
+  language verdicts on otherwise-strong matches.
 
 ## Output format
 
