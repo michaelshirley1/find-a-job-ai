@@ -17,9 +17,11 @@ Reports are written to data/reports/YYYY-MM-DD.md.
 
 MARKET-SPECIFIC EXTRAS: setting profile["market"] to "japan" additionally scrapes
 three Japan-focused boards JobSpy doesn't cover (TokyoDev, Japan Dev, Daijob) and
-turns on a Japanese-language requirement filter (JLPT-aware). Any other market value
-runs JobSpy only, with no language-requirement filtering (nothing in this script
-knows how to parse requirement phrasing for languages other than Japanese yet).
+turns on a Japanese-language requirement filter (JLPT-aware). Language-requirement
+filtering is otherwise driven by profile["language_requirements"]["target_language"]:
+"japanese" and "korean" (TOPIK-aware) are implemented; any other value (or the field
+left unset) runs with no language filtering at all, since nothing in this script
+knows how to parse requirement phrasing for other languages yet.
 
 CAREERCROSS IS SKIPPED even under market=japan: as of 2026-07, its listing page
 returns a Cloudflare JS-challenge (403) on a plain fetch and WebFetch-based
@@ -199,10 +201,106 @@ def check_language_japanese(text, tag_value, lang_req):
     return "silent", "no Japanese requirement mentioned either way"
 
 
+# TOPIK numbering runs the opposite direction from JLPT: level 6 is the most
+# proficient, level 1 the least. A candidate with no certified level clears
+# nothing explicit — same conservative default as the Japanese/JLPT path.
+TOPIK_RANK = {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6}
+
+KO_HARD_FAIL_PATTERNS = [
+    r"native\s+korean",
+    r"business[- ]level\s+korean",
+    r"fluent\s+(in\s+)?korean",
+    r"korean\s+and\s+english",
+    r"korean.{0,15}(required|mandatory|essential)",
+    r"korean\s+level",
+    r"(communication|language)\s+skills?\s+in\s+korean",
+    r"korean\s+to\s+(work|communicate|collaborate|interact)\s+(effectively\s+)?with",
+    r"업무상\s*한국어\s*회화",
+    r"한국어\s*능통",
+    r"한국어\s*원어민",
+]
+KO_LEVEL_PATTERNS = [
+    r"topik\s*(?:level\s*)?([123456])",
+    r"korean\s*\(?level\s*([123456])\)?",
+]
+KO_POSITIVE_OVERRIDE = [
+    r"no korean required",
+    r"korean\s*[:\-]?\s*not required",
+    r"korean.{0,20}(nice to have|a plus|optional|ideally|not required)",
+    r"korean[:\s]+none\b",
+]
+HANGUL_RE = re.compile(r"[가-힣]")
+
+
+def hangul_ratio(text):
+    if not text:
+        return 0.0
+    total = len(text)
+    hangul = len(HANGUL_RE.findall(text))
+    return hangul / total if total else 0.0
+
+
+def check_language_korean(text, tag_value, lang_req):
+    """Returns (status, evidence) where status in clear/flagged/fail/silent."""
+    tag_clear = set(lang_req.get("tag_clear", ["No Korean required", "None"]))
+    tag_flag = set(lang_req.get("tag_flag", ["Basic Korean", "Minimum Communication Level"]))
+    certified = lang_req.get("certified_level")
+    candidate_rank = TOPIK_RANK.get(str(certified).lower().strip()) if certified else None
+
+    if tag_value is not None:
+        if tag_value in tag_clear:
+            return "clear", f"tag: {tag_value}"
+        if tag_value in tag_flag:
+            return "flagged", f"tag: {tag_value} (self-assessed/uncertified claim)"
+        if tag_value == "required":
+            return "fail", "tag: Korean Required"
+        m = re.search(r"([123456])", tag_value.lower())
+        if m and candidate_rank is not None and candidate_rank >= int(m.group(1)):
+            return "clear", f"tag: {tag_value} (cleared by held level {certified})"
+        return "fail", f"tag: {tag_value}"
+
+    if not text:
+        return "silent", "no description text available"
+
+    low = text.lower()
+    if hangul_ratio(text) > 0.25:
+        return "fail", "majority-Korean posting (Hangul ratio check)"
+
+    for pat in KO_LEVEL_PATTERNS:
+        m = re.search(pat, low)
+        if m:
+            required_rank = int(m.group(1))
+            if candidate_rank is not None and candidate_rank >= required_rank:
+                return "clear", f"matched '{m.group(0)}', cleared by held level {certified}"
+            for override in KO_POSITIVE_OVERRIDE:
+                om = re.search(override, low)
+                if om:
+                    return "clear", f"explicit override: '{om.group(0)}' clears '{m.group(0)}'"
+            return "fail", f"matched: '{m.group(0)}'"
+
+    for pat in KO_HARD_FAIL_PATTERNS:
+        m = re.search(pat, low)
+        if m:
+            for override in KO_POSITIVE_OVERRIDE:
+                om = re.search(override, low)
+                if om:
+                    return "clear", f"explicit override: '{om.group(0)}' clears '{m.group(0)}'"
+            return "fail", f"matched: '{m.group(0)}'"
+
+    for override in KO_POSITIVE_OVERRIDE:
+        m = re.search(override, low)
+        if m:
+            return "clear", f"explicit: '{m.group(0)}'"
+
+    return "silent", "no Korean requirement mentioned either way"
+
+
 def check_language(text, tag_value, lang_req):
     target = str(lang_req.get("target_language") or "").lower()
     if target == "japanese":
         return check_language_japanese(text, tag_value, lang_req)
+    if target == "korean":
+        return check_language_korean(text, tag_value, lang_req)
     return "not_applicable", "no language-requirement filter configured for this market"
 
 
@@ -340,14 +438,50 @@ SENIORITY_EXCLUDE_TITLE = re.compile(
 SENIORITY_STRETCH = re.compile(
     r"\b(senior|lead|staff|principal|manager|director|head of)\b", re.I
 )
+# Spelled-out numbers ("At least five years...", "three years of experience as a
+# technical lead") are at least as common as digits in professionally-written JDs,
+# but a digit-only \d{1,2} regex silently never matches them at all — confirmed on
+# Geniee's "Tech Lead Engineer" posting (found 2026-10-20), which required "five
+# years of professional experience as a software engineer" and, separately, "three
+# years of experience as a technical lead or architect." Both were missed, so the
+# seniority check fell through to an unrelated "~2-3+ years of experience" figure
+# from Japan Dev's generic "Mid-level or above" page-chrome blurb (not even part of
+# the JD body) and wrongly graded the listing as within-band.
+WORDNUM = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15,
+}
+NUM_TOKEN = r"(?:\d{1,2}|" + "|".join(WORDNUM) + r")"
+
+
+def _num_token_to_int(token):
+    token = token.lower()
+    return WORDNUM.get(token) or int(token)
+
+
 # Matches explicit years-of-experience asks in whatever phrasing the JD uses, e.g.
 # "10+ years in server-side backend engineering", "4+ years of professional
-# experience", "5-7 Years Experience". A much harder signal than the title-keyword
-# check and must win when present.
+# experience", "5-7 Years Experience", "At least five years of experience". A much
+# harder signal than the title-keyword check and must win when present.
 YEARS_REQUIRED = re.compile(
-    r"(\d{1,2})\+?\s*(?:[-–—]\s*|to\s+)?(\d{1,2})?\+?\s*years?\s*"
+    rf"({NUM_TOKEN})\+?\s*(?:[-–—]\s*|to\s+)?({NUM_TOKEN})?\+?\s*years?\s*"
     r"(?:of\s+)?(?:professional\s+|relevant\s+|industry\s+)?"
     r"(?:experience|in\s+\w+(?:[\s-]\w+){0,3}|engineering|development)",
+    re.I,
+)
+# A separate, stacked requirement — "N years of experience AS a technical lead /
+# architect / engineering manager" asks for leadership tenure specifically, on top
+# of (not instead of) general engineering experience. Treat it additively with
+# whatever base YEARS_REQUIRED figure is found, since in practice you need to have
+# been an engineer first before racking up years specifically in a lead/architect
+# capacity — the Geniee JD above asks for "five years...as a software engineer"
+# AND, separately, "three years...as a technical lead or architect," which is a
+# materially bigger ask than either figure alone.
+LEAD_YEARS_REQUIRED = re.compile(
+    rf"({NUM_TOKEN})\+?\s*years?\s*(?:of\s+)?experience\s+as\s+(?:an?\s+)?"
+    r"(?:technical\s+lead|team\s+lead|tech\s+lead|lead\s+engineer|architect|"
+    r"engineering\s+manager|staff\s+engineer|principal\s+engineer)",
     re.I,
 )
 ROLE_ADJACENT = re.compile(
@@ -364,6 +498,31 @@ AI_GIG_PATTERNS = [
     r"no prior ai experience required",
     r"per-project pay",
 ]
+# Known AI-training/RLHF/data-labeling gig-mill companies whose postings don't
+# reliably trip AI_GIG_PATTERNS in the body text (titles like "AI Expert" /
+# "Content Specialist" rather than the "train next-gen AI" phrasing) but are the
+# same contractor-mill pattern — exclude by company name outright.
+AI_GIG_COMPANIES = {
+    "dataannotation",
+    "yo it consulting",
+    "yo ai labs",
+    "alignerr",
+}
+# Freelance-marketplace / expert-network gig platforms — read like a real single-
+# employer posting but are actually "post your hourly rate to a marketplace" gigs,
+# not long-term employment. Twine confirmed 2026-08-01 (generic "long-term
+# project," no identifiable employer); Ethos's "Expert Opportunity" listings and
+# Synthires' "$100-150/hr Remote" posting are the same pattern under different
+# branding — caught by company name plus a generic $X/hr-marketplace regex so new
+# platforms with this shape don't need a name added every time.
+GIG_MARKETPLACE_COMPANIES = {
+    "twine",
+    "ethos",
+}
+GIG_MARKETPLACE_PATTERNS = [
+    r"expert opportunity",
+    r"\$\d+(?:[\-–]\$?\d+)?\s*/\s*hr\b",
+]
 RECRUITER_SPAM_PATTERNS = [
     r"line\s*/\s*telegram", r"line id[:\s]", r"📫|💌",
 ]
@@ -379,21 +538,74 @@ def unescape_markdown(text):
     return MARKDOWN_ESCAPE_RE.sub(r"\1", text) if text else text
 
 
+def md_cell(value):
+    """Collapse embedded whitespace/newlines and escape '|' before dropping a
+    scraped value (title, company, salary) into a markdown table cell. Without
+    this, a title that itself contains a literal '|' (e.g. a G Talent posting
+    titled "...Engineer | JLPT N2 Level~") silently splits into extra columns
+    and shifts every field after it; a value with raw newlines (e.g. Daijob's
+    star-rating badge leaking into a failed field-extraction fallback) breaks
+    the row across multiple lines. Confirmed in data/reports/2026-10-18.md."""
+    return clean_field(value).replace("|", "\\|")
+
+
+def clean_field(value):
+    """Collapse embedded whitespace/newlines without the markdown-table pipe
+    escaping — for contexts (bullet lists) that don't break on a literal '|'
+    but still shouldn't show raw multi-line scraper garbage."""
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
 def check_seniority(title, text, your_years):
     if SENIORITY_EXCLUDE_TITLE.search(title):
         return "exclude", f"title indicates junior/entry/intern level: '{title}'"
 
     full = f"{title} {text or ''}"
+
+    # A distinct "N years as technical lead/architect/..." ask stacks on top of the
+    # base years-of-experience figure rather than replacing it — see LEAD_YEARS_REQUIRED.
+    # Found first so its span can be excluded below: "four years of experience as a
+    # staff engineer" is a single requirement that both YEARS_REQUIRED and
+    # LEAD_YEARS_REQUIRED would otherwise match independently and double-count.
+    lead_spans = [m.span() for m in LEAD_YEARS_REQUIRED.finditer(full)]
+
+    def _overlaps_lead(span):
+        return any(not (span[1] <= s[0] or span[0] >= s[1]) for s in lead_spans)
+
     best_years = None
     best_match = None
     for m in YEARS_REQUIRED.finditer(full):
-        nums = [int(g) for g in m.groups() if g]
+        if _overlaps_lead(m.span()):
+            continue
+        nums = [_num_token_to_int(g) for g in m.groups() if g]
         if not nums:
             continue
         years = max(nums)
         if best_years is None or years > best_years:
             best_years = years
             best_match = m.group(0)
+
+    best_lead_years = None
+    best_lead_match = None
+    for m in LEAD_YEARS_REQUIRED.finditer(full):
+        years = _num_token_to_int(m.group(1))
+        if best_lead_years is None or years > best_lead_years:
+            best_lead_years = years
+            best_lead_match = m.group(0)
+
+    if best_lead_match:
+        lead_years = best_lead_years
+        total_years = (best_years or 0) + lead_years
+        evidence = (
+            f"'{best_match}' plus '{best_lead_match}' = ~{total_years}+ years combined vs your ~{your_years}"
+            if best_years else
+            f"explicit ask of {lead_years} years specifically as a lead/architect vs your ~{your_years}: '{best_lead_match}'"
+        )
+        if total_years >= your_years + 3.5:
+            return "big_stretch", evidence
+        if total_years >= your_years + 1.5:
+            return "stretch", evidence
+        return "match", evidence
 
     if best_years is not None:
         if best_years >= your_years + 3.5:
@@ -420,7 +632,9 @@ def check_role_family(title, text, tags):
     return "core", "core software engineering role"
 
 
-def check_ai_gig(text):
+def check_ai_gig(text, company=None):
+    if company and str(company).strip().lower() in AI_GIG_COMPANIES:
+        return True, f"known AI-training/data-labeling gig company: '{company}'"
     if not text:
         return False, None
     low = text.lower()
@@ -428,6 +642,17 @@ def check_ai_gig(text):
         m = re.search(pat, low)
         if m:
             return True, m.group(0)
+    return False, None
+
+
+def check_gig_marketplace(title, text, company=None):
+    if company and str(company).strip().lower() in GIG_MARKETPLACE_COMPANIES:
+        return True, f"known freelance-marketplace/expert-network company: '{company}'"
+    combined = f"{title} {text or ''}".lower()
+    for pat in GIG_MARKETPLACE_PATTERNS:
+        m = re.search(pat, combined)
+        if m:
+            return True, f"matched: '{m.group(0)}'"
     return False, None
 
 
@@ -684,7 +909,18 @@ def scrape_daijob(job_titles):
                 lvl = m.group(1).strip() if m else "UNKNOWN"
                 if lvl not in keep_levels:
                     continue
-                title_m = re.search(r"Staff Level \| ([^|]+) \| ([^|]+)", text)
+                # The star-rating badge preceding company+title is seniority-
+                # specific text ("Staff Level", "Senior Level", "Manager Level",
+                # "Entry Level" confirmed live — not always literally "Staff
+                # Level"). Matching only "Staff Level" made every other badge
+                # fall through to the text[:80]/"unknown" fallback below, which
+                # is where the garbled "unknown / Recruiter" listings full of
+                # literal "★" characters in past reports came from (see e.g.
+                # data/reports/2026-10-18.md, 2026-08-12.md) — the fallback was
+                # grabbing the still-unmatched star-rating markup, not a real
+                # title. Match on the "Level |" suffix common to all of them
+                # instead, excluding the later unrelated "Japanese Level" field.
+                title_m = re.search(r"(?<!Japanese )\bLevel \| ([^|]+) \| ([^|]+)", text)
                 sal_m = re.search(r"Salary \| ([^|]+)", text)
                 cards[href] = {
                     "source": "daijob",
@@ -765,16 +1001,31 @@ def evaluate(job, ctx):
     """Mutates job in place with evaluation fields. Returns True if it should be graded, False if hard-excluded."""
     title = job["title"]
     text = job["description"]
+    # G Talent (a recurring Japan staffing-agency source) routinely states the
+    # actual JLPT requirement in the TITLE rather than the description, e.g.
+    # "...Hybrid / JLPT N2 Level~" or "...Business level Japanese" — confirmed
+    # in data/reports/2026-08-19.md, 2026-08-22.md, 2026-10-18.md, where these
+    # exact postings graded B/C/D with language marked "silent" because the
+    # check only ever scanned `text`. Language and work-authorization checks
+    # need the title folded in; checks that already take `title` separately
+    # (seniority, role-family, location-type) are unaffected.
+    lang_workauth_text = f"{title} {text}"
     tags = job.get("tags") or []
     job.setdefault("salary", None)
 
-    ai_gig, ai_evidence = check_ai_gig(text)
+    ai_gig, ai_evidence = check_ai_gig(text, job.get("company"))
     if ai_gig:
         job["excluded"] = True
         job["exclusion_reason"] = f"AI-training/RLHF gig, not a real role: '{ai_evidence}'"
         return False
 
-    lang_status, lang_evidence = check_language(text, job.get("language_tag"), ctx["lang_req"])
+    gig_marketplace, gig_evidence = check_gig_marketplace(title, text, job.get("company"))
+    if gig_marketplace:
+        job["excluded"] = True
+        job["exclusion_reason"] = f"Freelance-marketplace/expert-network gig, not a real role: '{gig_evidence}'"
+        return False
+
+    lang_status, lang_evidence = check_language(lang_workauth_text, job.get("language_tag"), ctx["lang_req"])
     if lang_status == "fail":
         job["excluded"] = True
         job["exclusion_reason"] = f"Language requirement: {lang_evidence}"
@@ -791,7 +1042,7 @@ def evaluate(job, ctx):
         auth_status, auth_evidence = "clear", f"candidate holds {ctx['workauth_country']} citizenship — no visa/sponsorship needed"
     else:
         auth_status, auth_evidence = check_workauth(
-            text, job.get("sponsorship_tag"), ctx["workauth_disqualify"], ctx["workauth_positive"]
+            lang_workauth_text, job.get("sponsorship_tag"), ctx["workauth_disqualify"], ctx["workauth_positive"]
         )
     if auth_status == "fail":
         job["excluded"] = True
@@ -932,12 +1183,12 @@ def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for j in sorted(a_b, key=lambda j: (-j["interview_pct"], -j["score"])):
             lines.append(
-                f"| {j['grade']} | {j['interview_pct']}% | {j['score']} | {j['company']} | {j['title']} | "
-                f"{j.get('salary') or '—'} | "
-                f"{j['stack_note']} | {j['language_status']}: {j['language_evidence']} | "
-                f"{j['workauth_status']}: {j['workauth_evidence']} | "
-                f"{j['location_status']}: {j['location_evidence']} | "
-                f"{j['seniority_status']}: {j['seniority_evidence']} | [{j['source']}]({j['job_url']}) |"
+                f"| {j['grade']} | {j['interview_pct']}% | {j['score']} | {md_cell(j['company'])} | {md_cell(j['title'])} | "
+                f"{md_cell(j.get('salary')) or '—'} | "
+                f"{md_cell(j['stack_note'])} | {j['language_status']}: {md_cell(j['language_evidence'])} | "
+                f"{j['workauth_status']}: {md_cell(j['workauth_evidence'])} | "
+                f"{j['location_status']}: {md_cell(j['location_evidence'])} | "
+                f"{j['seniority_status']}: {md_cell(j['seniority_evidence'])} | [{j['source']}]({j['job_url']}) |"
             )
         lines.append("")
 
@@ -948,12 +1199,12 @@ def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for j in rest:
             lines.append(
-                f"| {j['grade']} | {j['score']} | {j['company']} | {j['title']} | "
-                f"{j.get('salary') or '—'} | "
-                f"{j['stack_note']} | {j['language_status']}: {j['language_evidence']} | "
-                f"{j['workauth_status']}: {j['workauth_evidence']} | "
-                f"{j['location_status']}: {j['location_evidence']} | "
-                f"{j['seniority_status']}: {j['seniority_evidence']} | [{j['source']}]({j['job_url']}) |"
+                f"| {j['grade']} | {j['score']} | {md_cell(j['company'])} | {md_cell(j['title'])} | "
+                f"{md_cell(j.get('salary')) or '—'} | "
+                f"{md_cell(j['stack_note'])} | {j['language_status']}: {md_cell(j['language_evidence'])} | "
+                f"{j['workauth_status']}: {md_cell(j['workauth_evidence'])} | "
+                f"{j['location_status']}: {md_cell(j['location_evidence'])} | "
+                f"{j['seniority_status']}: {md_cell(j['seniority_evidence'])} | [{j['source']}]({j['job_url']}) |"
             )
         lines.append("")
 
@@ -967,8 +1218,8 @@ def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded
         lines.append("## New excluded listings (why)")
         lines.append("")
         for j in new_excluded:
-            sal = f" ({j['salary']})" if j.get("salary") else ""
-            lines.append(f"- **{j['company']}** — {j['title']}{sal}: {j['exclusion_reason']} ([{j['source']}]({j['job_url']}))")
+            sal = f" ({clean_field(j['salary'])})" if j.get("salary") else ""
+            lines.append(f"- **{clean_field(j['company'])}** — {clean_field(j['title'])}{sal}: {j['exclusion_reason']} ([{j['source']}]({j['job_url']}))")
         lines.append("")
 
     lines.append("## Source notes")

@@ -461,6 +461,51 @@ and stack/skill scoring.
   distinct from the "fluent/native/business-level" family already covered —
   watch for other unclaimed phrasings like it when spot-checking "silent"
   language verdicts on otherwise-strong matches.
+- **Language/work-authorization checks never looked at the job title (found
+  2026-10-20, present since the earliest reports) — a real grading mistake,
+  not just a display bug.** `evaluate()` passed only `job["description"]` to
+  `check_language`/`check_workauth`, never the title. **G Talent** (a
+  recurring Japan staffing-agency source) routinely states the actual JLPT
+  requirement in the title rather than the description — confirmed four times
+  across past reports, all graded as if language were unverified instead of
+  excluded: "【Backend Engineer - Golang】.../Japanese N2 level" (D/53,
+  2026-08-19.md), "...Remote OK/Business level Japanese..." (D/51,
+  2026-08-22.md), "【Senior Backend Engineer(Node.js/Ruby/Go)】Hybrid/JLPT N2
+  Level~" (**B/71, surfaced in the top "New A/B listings" table**,
+  2026-10-18.md), "【Platform Engineer】Hybrid/JLPT N2 Level~" (C/63,
+  2026-10-18.md). Fixed by folding title into the text both checks scan
+  (`lang_workauth_text = f"{title} {text}"` in `evaluate()`); the checks that
+  already took title separately (seniority, role-family, location-type) were
+  unaffected. Lesson: when a source's language/visa requirement sometimes
+  lives in the title instead of the body (G Talent's format puts it after a
+  trailing "/" or "|" in the title itself), a check that only looks at
+  description text has a real blind spot, not just a cosmetic one — worth
+  re-auditing whether any other per-field check (workauth, in particular) has
+  the same gap for a source not yet caught in the data.
+- **Daijob seniority-badge extraction bug (found 2026-10-19, present since the
+  earliest reports in data/reports/):** `scrape_daijob`'s title/company regex
+  hardcoded the literal text "Staff Level" as the anchor preceding the
+  company-name/title pair, but Daijob's star-rating badge text varies by the
+  role's actual seniority tier — confirmed live: "Staff Level", "Senior
+  Level", "Manager Level", "Entry Level". Any card using one of the other
+  three labels silently fell through to the `text[:80]`/`"unknown"` fallback,
+  producing exactly the garbled "unknown / Recruiter" rows full of literal
+  "★" characters visible in multiple past reports (e.g.
+  data/reports/2026-10-18.md, 2026-08-12.md, 2026-08-19.md) — real company
+  names and job titles were being thrown away silently on every run for
+  ~60% of Daijob's recruiter-posted cards. Fixed by anchoring on the common
+  `"Level |"` suffix (`(?<!Japanese )\bLevel \| ([^|]+) \| ([^|]+)`,
+  excluding the unrelated later "Japanese Level" field) instead of one
+  specific badge string. Also added `md_cell()` — collapses embedded
+  whitespace/newlines and escapes a literal `|` — around every field written
+  into a report table row, since a scraped title containing a literal pipe
+  (confirmed on G Talent listings, e.g. "...Engineer | JLPT N2 Level～") or
+  leftover multi-line garbage from a future scraper bug otherwise shifts or
+  breaks the whole row rather than failing visibly. Lesson: a markdown table
+  is not a safe sink for untrusted scraped text without escaping, and a
+  one-off literal-string anchor in a scraper regex needs to be re-verified
+  against a handful of live cards, not assumed stable, since sites vary field
+  values (not just structure) per listing.
 
 ## Output format
 
