@@ -556,9 +556,26 @@ def clean_field(value):
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def check_seniority(title, text, your_years):
+JOB_LEVEL_EXCLUDE = {"internship", "entry level"}
+JOB_LEVEL_BIG_STRETCH = {"director", "executive"}
+JOB_LEVEL_CONFIRMS_MATCH = {"associate", "mid-senior level"}
+
+
+def check_seniority(title, text, your_years, job_level=None):
     if SENIORITY_EXCLUDE_TITLE.search(title):
         return "exclude", f"title indicates junior/entry/intern level: '{title}'"
+
+    # LinkedIn's own "Seniority level" field (job_level) is a structured signal
+    # the employer picked themselves, not a title/body regex guess — it catches
+    # cases the keyword regexes below miss entirely, e.g. a title with no
+    # seniority keyword at all ("Backend Developer") that LinkedIn still tags
+    # "Director". Checked before the years-based regexes below only for the
+    # exclude case (internship/entry-level is disqualifying regardless of any
+    # years figure in the body); years-based figures still win over the
+    # director/executive/match signals further down since they're more specific.
+    job_level = (job_level or "").strip().lower()
+    if job_level in JOB_LEVEL_EXCLUDE:
+        return "exclude", f"LinkedIn seniority-level field: '{job_level}'"
 
     full = f"{title} {text or ''}"
 
@@ -614,10 +631,19 @@ def check_seniority(title, text, your_years):
             return "stretch", f"explicit ask of {best_years} years vs your ~{your_years}: '{best_match}'"
         return "match", f"explicit ask of {best_years} years is within your ~{your_years}yr band: '{best_match}'"
 
+    # No explicit years figure anywhere in title/body — LinkedIn's own
+    # Director/Executive tag is a harder signal than the generic keyword regex
+    # below (it catches titles with no seniority keyword in them at all) so it
+    # takes priority over SENIORITY_STRETCH.
+    if job_level in JOB_LEVEL_BIG_STRETCH:
+        return "big_stretch", f"LinkedIn seniority-level field: '{job_level}' vs your ~{your_years}yr IC band"
+
     combined = f"{title} {text[:2000] if text else ''}"
     m = SENIORITY_STRETCH.search(combined)
     if m:
         return "stretch", f"title-only signal, no explicit years found: '{m.group(0)}'"
+    if job_level in JOB_LEVEL_CONFIRMS_MATCH:
+        return "match", f"LinkedIn seniority-level field confirms fit: '{job_level}'"
     return "match", "seniority looks like a reasonable fit"
 
 
@@ -805,6 +831,10 @@ def scrape_jobspy(job_titles, locations, country_indeed, hours_old):
             "sponsorship_tag": None,
             "detail_blocked": False,
             "salary": format_salary_jobspy(r),
+            # LinkedIn's own "Seniority level" criterion (Indeed/other sources
+            # never populate this jobspy column) — a structured signal, not a
+            # regex guess off the title. See check_seniority().
+            "job_level": str(r.get("job_level") or "").strip().lower(),
         })
     return jobs
 
@@ -1055,7 +1085,7 @@ def evaluate(job, ctx):
         job["exclusion_reason"] = f"Location type: {loc_evidence}"
         return False
 
-    sen_status, sen_evidence = check_seniority(title, text, ctx["years_experience"])
+    sen_status, sen_evidence = check_seniority(title, text, ctx["years_experience"], job.get("job_level"))
     if sen_status == "exclude":
         job["excluded"] = True
         job["exclusion_reason"] = sen_evidence
@@ -1224,7 +1254,15 @@ def write_report(new_graded, new_excluded, today, all_graded_count, all_excluded
 
     lines.append("## Source notes")
     lines.append("")
-    source_notes = ["- JobSpy (Indeed/LinkedIn): last-24h window (or as configured via --hours-old)."]
+    source_notes = [
+        "- JobSpy (Indeed/LinkedIn): last-24h window (or as configured via --hours-old).",
+        "- LinkedIn: the 'Requirements added by the job poster' qualifications chip "
+        "(e.g. 'Authorized to work in Japan') is only rendered for logged-in viewers "
+        "and isn't present in the scraped page at all — confirmed 2026-10-21 by diffing "
+        "the raw anonymous-fetch HTML against what a logged-in browser shows. A "
+        "work-authorization verdict of 'silent' on a LinkedIn listing is unverified, "
+        "not cleared — open the listing yourself before applying.",
+    ]
     if profile["market"] == "japan":
         source_notes += [
             "- Japan Dev: 'NEW!' badge used as a loose recency proxy, not exact.",
